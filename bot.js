@@ -275,11 +275,11 @@ async function sendTxs(signer, api, addr, stats) {
     return;
   }
 
-  const balEth = parseFloat(ethers.formatEther(bal)).toFixed(4);
-  log(addr, `Balance: ${C.bold}${balEth} ETH${C.reset}`, 'info');
+  const balDac = parseFloat(ethers.formatEther(bal)).toFixed(4);
+  log(addr, `Balance: ${C.bold}${balDac} DAC${C.reset}`, 'info');
 
   if (bal < ethers.parseEther('0.001')) {
-    log(addr, `Balance too low (${balEth} ETH) — skip TX`, 'skip');
+    log(addr, `Balance too low (${balDac} DAC) — skip TX`, 'skip');
     return;
   }
 
