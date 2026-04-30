@@ -457,9 +457,35 @@ async function runWallet(pk, proxy, index, total) {
   // 1. Faucet
   try {
     const f = await api.faucetClaim();
-    const msg = f?.message || f?.status || JSON.stringify(f);
-    log(addr, `Faucet: ${msg}`, 'ok');
-    stats.faucet = msg;
+
+    // Handle: account not linked to X / Discord
+    if (f?.code === 'social_required') {
+      log(addr, `Faucet skipped — ${C.yellow}${f.error}${C.reset}`, 'warn');
+      log(addr, `${C.dim}👉 Link your X or Discord at https://inception.dachain.io to activate faucet.${C.reset}`, 'warn');
+      stats.faucet = 'social_required';
+
+    // Handle: already claimed
+    } else if (
+      f?.code === 'already_claimed' ||
+      (typeof f?.error === 'string' && /already/i.test(f.error)) ||
+      (typeof f?.message === 'string' && /already/i.test(f.message))
+    ) {
+      const msg = f?.error || f?.message || 'already claimed';
+      log(addr, `Faucet: ${C.yellow}${msg}${C.reset}`, 'skip');
+      stats.faucet = 'already claimed';
+
+    // Handle: other API-level error
+    } else if (f?.error) {
+      log(addr, `Faucet error — ${C.red}${f.error}${C.reset} (code: ${f?.code ?? 'none'})`, 'warn');
+      stats.faucet = `error: ${f.error}`;
+
+    // Success
+    } else {
+      const msg = f?.message || f?.status || JSON.stringify(f);
+      log(addr, `Faucet: ${C.green}${msg}${C.reset}`, 'ok');
+      stats.faucet = msg;
+    }
+
   } catch (e) {
     if (isServerError(e)) {
       log(addr, `Faucet server error — skip: ${e.message}`, 'skip');
