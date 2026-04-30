@@ -1,7 +1,7 @@
 /**
  * DAC Inception — Daily Multi-Wallet Bot (Improved)
  * - Proxy optional (API + RPC)
- * - TX fixed 15x per wallet
+ * - TX fixed 5x per wallet
  * - Better output (timestamp, color, emoji, summary)
  * - Skip wallet on persistent server error
  */
@@ -284,7 +284,7 @@ async function sendTxs(signer, api, addr, stats) {
   }
 
   const targets = loadAddresses();
-  const txCount = 15;
+  const txCount = 5;
   log(addr, `Sending ${C.bold}${txCount} TX${C.reset}...`, 'send');
 
   let sent = 0;
@@ -436,7 +436,7 @@ async function runWallet(pk, proxy, index, total) {
   const signer   = wallet.connect(provider);
   const api      = new ApiClient(wallet, proxy);
 
-  const stats = { txSent: 0, txTotal: 15, faucet: '', burn: '', qe: null, badges: '0' };
+  const stats = { txSent: 0, txTotal: 5, faucet: '', burn: '', qe: null, badges: '0' };
 
   divider('═');
   log(addr, `Wallet ${C.bold}${index}/${total}${C.reset} | ${proxy ? `proxy ${C.dim}${proxy.slice(0,20)}...${C.reset}` : 'direct'}`, 'start');
@@ -470,7 +470,7 @@ async function runWallet(pk, proxy, index, total) {
   }
   await sleep(2000);
 
-  // 2. Send 15 TX
+  // 2. Send 5 TX
   await sendTxs(signer, api, addr, stats);
 
   // 3. Burn DACC for QE
