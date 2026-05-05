@@ -1,7 +1,7 @@
 /**
  * DAC Inception — Daily Multi-Wallet Bot (Improved)
  * - Proxy optional (API + RPC)
- * - TX fixed 5x per wallet
+ * - TX fixed 2x per wallet
  * - Better output (timestamp, color, emoji, summary)
  * - Skip wallet on persistent server error
  */
@@ -284,7 +284,7 @@ async function sendTxs(signer, api, addr, stats) {
   }
 
   const targets = loadAddresses();
-  const txCount = 5;
+  const txCount = 2;
   log(addr, `Sending ${C.bold}${txCount} TX${C.reset}...`, 'send');
 
   let sent = 0;
