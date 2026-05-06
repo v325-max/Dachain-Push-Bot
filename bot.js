@@ -1,7 +1,7 @@
 /**
  * DAC Inception — Daily Multi-Wallet Bot (Improved)
  * - Proxy optional (API + RPC)
- * - TX fixed 2x per wallet
+ * - TX fixed 5x per wallet
  * - Better output (timestamp, color, emoji, summary)
  * - Skip wallet on persistent server error
  */
@@ -30,8 +30,47 @@ const CFG = {
     'function claim(uint256 badgeId) external',
     'function safeMint(address to, uint256 tokenId) external',
   ],
-  loopMs: 10 * 60 * 1000,
+  loopMinHr:     4,   // min loop hours
+  loopMaxHr:     8,   // max loop hours
+  qcrateMax:     5,   // max quantum crate opens per 24 hours (server limit: 5)
+  concurrency:    3,   // wallets processed in parallel (increase if you have more proxies)
 };
+
+// ================= GLOBAL ERROR GUARD =================
+// Prevents bot from crashing on 500/504 RPC errors thrown internally by ethers.js
+// These escape try/catch because they are emitted outside the awaited promise chain.
+process.on('unhandledRejection', (err) => {
+  const msg  = err?.message || String(err);
+  const code = err?.code    || '';
+  if (
+    /500|502|503|504|timeout|econnreset|econnrefused|enotfound|network|socket|server_error/i.test(msg) ||
+    /SERVER_ERROR|NETWORK_ERROR|TIMEOUT/i.test(code)
+  ) {
+    console.log(
+      `\x1b[90m[${new Date().toLocaleTimeString('en-US', { hour12: false })}]\x1b[0m` +
+      ` \x1b[33m?\x1b[0m \x1b[2m[unhandledRejection]\x1b[0m RPC error suppressed: ${msg.split('\n')[0]}`
+    );
+  } else {
+    console.error(`\x1b[31m? [unhandledRejection]\x1b[0m`, msg);
+  }
+});
+
+process.on('uncaughtException', (err) => {
+  const msg  = err?.message || String(err);
+  const code = err?.code    || '';
+  if (
+    /500|502|503|504|timeout|econnreset|econnrefused|enotfound|network|socket|server_error/i.test(msg) ||
+    /SERVER_ERROR|NETWORK_ERROR|TIMEOUT/i.test(code)
+  ) {
+    console.log(
+      `\x1b[90m[${new Date().toLocaleTimeString('en-US', { hour12: false })}]\x1b[0m` +
+      ` \x1b[33m?\x1b[0m \x1b[2m[uncaughtException]\x1b[0m RPC error suppressed: ${msg.split('\n')[0]}`
+    );
+  } else {
+    console.error(`\x1b[31m? [uncaughtException]\x1b[0m`, msg);
+    process.exit(1); // only exit on truly unexpected errors
+  }
+});
 
 // ================= LOGGER =================
 const C = {
@@ -54,29 +93,30 @@ function ts() {
 function log(addr, msg, level = 'info') {
   const short = addr ? `${C.cyan}${C.bold}[${addr.slice(0,6)}..${addr.slice(-4)}]${C.reset}` : '';
   const prefix = {
-    info:    `${C.blue}ℹ${C.reset}`,
-    ok:      `${C.green}✔${C.reset}`,
-    warn:    `${C.yellow}⚠${C.reset}`,
-    error:   `${C.red}✘${C.reset}`,
-    skip:    `${C.yellow}⏭${C.reset}`,
-    send:    `${C.magenta}➤${C.reset}`,
-    start:   `${C.cyan}▶${C.reset}`,
+    info:    `${C.blue}?${C.reset}`,
+    ok:      `${C.green}?${C.reset}`,
+    warn:    `${C.yellow}?${C.reset}`,
+    error:   `${C.red}?${C.reset}`,
+    skip:    `${C.yellow}?${C.reset}`,
+    send:    `${C.magenta}?${C.reset}`,
+    start:   `${C.cyan}?${C.reset}`,
   }[level] || '•';
   console.log(`${ts()} ${prefix} ${short} ${msg}`);
 }
 
-function divider(char = '─', len = 55) {
+function divider(char = '-', len = 55) {
   console.log(C.gray + char.repeat(len) + C.reset);
 }
 
 function logSummary(addr, stats) {
   divider();
-  console.log(`${ts()} ${C.bold}${C.cyan}📊 SUMMARY [${addr.slice(0,6)}..${addr.slice(-4)}]${C.reset}`);
-  console.log(`   ${C.green}✔ TX Sent   :${C.reset} ${stats.txSent}/${stats.txTotal}`);
-  console.log(`   ${stats.faucet ? C.green+'✔' : C.yellow+'✘'} Faucet    :${C.reset} ${stats.faucet || 'skipped'}`);
-  console.log(`   ${stats.burn   ? C.green+'✔' : C.yellow+'✘'} Burn      :${C.reset} ${stats.burn   || 'skipped'}`);
-  console.log(`   ${C.blue}ℹ QE Balance:${C.reset} ${stats.qe ?? '-'}`);
-  console.log(`   ${C.blue}ℹ Badges    :${C.reset} ${stats.badges}`);
+  console.log(`${ts()} ${C.bold}${C.cyan}?? SUMMARY [${addr.slice(0,6)}..${addr.slice(-4)}]${C.reset}`);
+  console.log(`   ${C.green}? TX Sent      :${C.reset} ${stats.txSent}/${stats.txTotal}`);
+  console.log(`   ${stats.faucet ? C.green+'?' : C.yellow+'?'} Faucet       :${C.reset} ${stats.faucet || 'skipped'}`);
+  console.log(`   ${stats.qcrate ? C.green+'?' : C.yellow+'?'} Quantum Crate:${C.reset} ${stats.qcrate || 'skipped'}`);
+  console.log(`   ${stats.burn   ? C.green+'?' : C.yellow+'?'} Burn         :${C.reset} ${stats.burn   || 'skipped'}`);
+  console.log(`   ${C.blue}? QE Balance  :${C.reset} ${stats.qe ?? '-'}`);
+  console.log(`   ${C.blue}? Badges      :${C.reset} ${stats.badges}`);
   divider();
 }
 
@@ -102,7 +142,7 @@ class ServerError extends Error {
   constructor(msg) { super(msg); this.name = 'ServerError'; }
 }
 
-async function withRetry(fn, { retries = 3, delayMs = 3000, label = '' } = {}) {
+async function withRetry(fn, { retries = 5, label = '' } = {}) {
   let lastErr;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -115,8 +155,8 @@ async function withRetry(fn, { retries = 3, delayMs = 3000, label = '' } = {}) {
           if (attempt === retries) {
             throw new ServerError(`HTTP ${status} after ${retries} attempts (${label})`);
           }
-          const wait = delayMs * attempt;
-          console.log(`${ts()} ${C.yellow}⟳${C.reset} ${C.gray}[retry]${C.reset} ${label} HTTP ${status} — retry in ${wait}ms (${attempt}/${retries})`);
+          const wait = 2000 + Math.floor(Math.random() * 8000);
+          console.log(`${ts()} ${C.yellow}?${C.reset} ${C.gray}[retry ${attempt}/${retries}]${C.reset} ${label} HTTP ${status} — wait ${wait / 1000}s`);
           await sleep(wait);
           continue;
         }
@@ -127,10 +167,14 @@ async function withRetry(fn, { retries = 3, delayMs = 3000, label = '' } = {}) {
       if (e instanceof ServerError) throw e; // already wrapped, propagate
 
       lastErr = e;
-      if (!isServerError(e) || attempt === retries) throw e;
+      if (!isServerError(e) || attempt === retries) {
+        // Wrap in ServerError if it's a server-type error so callers can detect it
+        if (isServerError(e)) throw new ServerError(`${label} failed after ${retries} attempts: ${e.message}`);
+        throw e;
+      }
 
-      const wait = delayMs * attempt;
-      console.log(`${ts()} ${C.yellow}⟳${C.reset} ${C.gray}[retry]${C.reset} ${label} — ${e.message} — retry in ${wait}ms (${attempt}/${retries})`);
+      const wait = 2000 + Math.floor(Math.random() * 8000);
+      console.log(`${ts()} ${C.yellow}?${C.reset} ${C.gray}[retry ${attempt}/${retries}]${C.reset} ${label} — ${e.shortMessage || e.message?.split('\n')[0]} — wait ${wait / 1000}s`);
       await sleep(wait);
     }
   }
@@ -151,11 +195,21 @@ function createProxyAgent(proxy) {
   return new HttpsProxyAgent(proxy);
 }
 function createProvider(proxy) {
-  if (!proxy) return new ethers.JsonRpcProvider(CFG.rpc);
-  const agent = createProxyAgent(proxy);
-  const fetchReq = new ethers.FetchRequest(CFG.rpc);
-  fetchReq.getUrlFunc = ethers.FetchRequest.createGetUrlFunc({ agent });
-  return new ethers.JsonRpcProvider(fetchReq);
+  let provider;
+  if (!proxy) {
+    provider = new ethers.JsonRpcProvider(CFG.rpc);
+  } else {
+    const agent = createProxyAgent(proxy);
+    const fetchReq = new ethers.FetchRequest(CFG.rpc);
+    fetchReq.getUrlFunc = ethers.FetchRequest.createGetUrlFunc({ agent });
+    provider = new ethers.JsonRpcProvider(fetchReq);
+  }
+  // Catch ethers internal provider errors (500/504) so they don't crash the process
+  provider.on('error', (err) => {
+    const msg = err?.message || String(err);
+    console.log(`\x1b[90m[${new Date().toLocaleTimeString('en-US', { hour12: false })}]\x1b[0m \x1b[33m?\x1b[0m \x1b[2m[provider.error]\x1b[0m ${msg.split('\n')[0]}`);
+  });
+  return provider;
 }
 
 // ================= API =================
@@ -235,6 +289,7 @@ class ApiClient {
   }
   faucetClaim()        { return this.post('/api/inception/faucet/'); }
   crateOpen()          { return this.post('/api/inception/crate/open/', { crate_name: 'daily' }); }
+  quantumCrateOpen()   { return this.post('/api/inception/crate/open/', { crate_name: 'quantum' }); }
   sync(tx)             { return this.post('/api/inception/sync/', { tx_hash: tx || '0x' }); }
   profile()            { return this.get('/api/inception/profile/'); }
   confirmBurn(tx)      { return this.post('/api/inception/exchange/confirm-burn/', { tx_hash: tx }); }
@@ -259,6 +314,24 @@ function pickRecipient(list, self) {
   return addr;
 }
 
+// ================= WAIT FOR RPC =================
+// Polls getBlockNumber until RPC responds — no max retry, keeps waiting.
+async function waitForRpc(provider, addr) {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      await provider.getBlockNumber();
+      if (attempt > 1) log(addr, `RPC ready after ${attempt} checks`, 'ok');
+      return;
+    } catch (e) {
+      const wait = 5000 + Math.floor(Math.random() * 5000); // 5–10s
+      log(addr, `Waiting for RPC (attempt ${attempt}) — retry in ${(wait / 1000).toFixed(1)}s`, 'warn');
+      await sleep(wait);
+    }
+  }
+}
+
 // ================= TX =================
 async function sendTxs(signer, api, addr, stats) {
   const provider = signer.provider;
@@ -278,28 +351,69 @@ async function sendTxs(signer, api, addr, stats) {
   const balDac = parseFloat(ethers.formatEther(bal)).toFixed(4);
   log(addr, `Balance: ${C.bold}${balDac} DAC${C.reset}`, 'info');
 
-  if (bal < ethers.parseEther('0.001')) {
+  if (bal < ethers.parseEther('0.41')) {
     log(addr, `Balance too low (${balDac} DAC) — skip TX`, 'skip');
     return;
   }
 
-  const targets = loadAddresses();
-  const txCount = 2;
+  const targets  = loadAddresses();
+  const txCount  = 5;
   log(addr, `Sending ${C.bold}${txCount} TX${C.reset}...`, 'send');
 
   let sent = 0;
   for (let i = 0; i < txCount; i++) {
     try {
       const to  = pickRecipient(targets, addr);
-      const amt = ethers.parseEther((0.0001 + Math.random() * 0.0002).toFixed(6));
-      const tx  = await withRetry(
-        () => signer.sendTransaction({ to, value: amt }),
+      const amt = ethers.parseEther((0.3 + Math.random() * 0.52).toFixed(6));
+
+      // -- Step 1: Prepare TX ------------------------------------------
+      log(addr, `TX ${i+1}/${txCount} ${C.dim}preparing...${C.reset}`, 'info');
+      let txObj;
+      try {
+        const [nonce, feeData, gasEst] = await Promise.all([
+          withRetry(() => provider.getTransactionCount(addr, 'pending'), { label: `nonce TX${i+1}` }),
+          withRetry(() => provider.getFeeData(),                          { label: `feeData TX${i+1}` }),
+          withRetry(() => provider.estimateGas({ from: addr, to, value: amt }), { label: `estimateGas TX${i+1}` })
+            .catch(() => 21000n),
+        ]);
+        txObj = { to, value: amt, nonce, gasLimit: gasEst * 120n / 100n };
+        if (feeData.maxFeePerGas) {
+          txObj.maxFeePerGas          = feeData.maxFeePerGas;
+          txObj.maxPriorityFeePerGas  = feeData.maxPriorityFeePerGas;
+        } else {
+          txObj.gasPrice = feeData.gasPrice;
+        }
+        log(addr,
+          `TX ${i+1} ready — nonce: ${C.bold}${nonce}${C.reset} | gas: ${C.bold}${txObj.gasLimit}${C.reset} | to: ${C.dim}${to.slice(0,10)}...${C.reset}`,
+          'info'
+        );
+      } catch (e) {
+        if (isServerError(e)) {
+          log(addr, `TX ${i+1} prepare server error — stop TX: ${e.message}`, 'skip');
+          break;
+        }
+        log(addr, `TX ${i+1} prepare failed: ${e.message}`, 'error');
+        break;
+      }
+
+      // -- Step 2: Wait for RPC ----------------------------------------
+      log(addr, `TX ${i+1}/${txCount} ${C.dim}waiting for RPC...${C.reset}`, 'info');
+      await waitForRpc(provider, addr);
+
+      // -- Step 3: Send ------------------------------------------------
+      log(addr, `TX ${i+1}/${txCount} ${C.dim}sending...${C.reset}`, 'send');
+      const tx = await withRetry(
+        () => signer.sendTransaction(txObj),
         { label: `TX ${i+1}` }
       );
       sent++;
-      log(addr, `TX ${i+1}/${txCount} ${C.green}✔${C.reset} → ${to.slice(0,8)}... | hash: ${C.dim}${tx.hash.slice(0,14)}...${C.reset}`, 'ok');
+      log(addr,
+        `TX ${i+1}/${txCount} ${C.green}?${C.reset} ? ${to.slice(0,10)}... | hash: ${C.dim}${tx.hash.slice(0,14)}...${C.reset}`,
+        'ok'
+      );
       await api.sync(tx.hash).catch(() => {});
       await sleep(2000 + Math.random() * 3000);
+
     } catch (e) {
       if (isServerError(e)) {
         log(addr, `TX ${i+1} server error — skip remaining TX: ${e.message}`, 'skip');
@@ -382,7 +496,7 @@ async function mintBadges(signer, api, addr, stats) {
           { label: `badge.${fn}(${badgeName})` }
         );
         await withRetry(() => tx.wait(), { label: `badge.${fn}.wait` });
-        log(addr, `Badge on-chain ${fn}() [${C.bold}${badgeName}${C.reset}] ✔ — ${C.dim}${tx.hash.slice(0,14)}...${C.reset}`, 'ok');
+        log(addr, `Badge on-chain ${fn}() [${C.bold}${badgeName}${C.reset}] ? — ${C.dim}${tx.hash.slice(0,14)}...${C.reset}`, 'ok');
         onChainOk = true;
         minted++;
       } catch (e) {
@@ -390,7 +504,7 @@ async function mintBadges(signer, api, addr, stats) {
           log(addr, `Badge on-chain server error — skip badge [${badgeName}]: ${e.message}`, 'skip');
           break; // skip remaining fn attempts for this badge
         }
-        // try next function (mint → claim)
+        // try next function (mint ? claim)
       }
     }
     if (!onChainOk) {
@@ -401,6 +515,69 @@ async function mintBadges(signer, api, addr, stats) {
   }
 
   stats.badges = `${minted}/${claimable.length} minted`;
+}
+
+// ================= QUANTUM CRATE =================
+async function openQuantumCrates(api, addr, stats) {
+  const limit = CFG.qcrateMax; // 5 per day (enforced server-side)
+  log(addr, `Opening up to ${C.bold}${limit} Quantum Crate(s)${C.reset} (costs 150 QE each)...`, 'info');
+
+  let opened = 0;
+  let totalQe = 0;
+
+  for (let i = 0; i < limit; i++) {
+    try {
+      const r = await api.quantumCrateOpen();
+
+      // Server-side daily limit reached
+      if (r?.error) {
+        const errMsg = r.error;
+        if (/limit|already|cooldown|insufficient|not enough/i.test(errMsg)) {
+          log(addr, `Quantum Crate: ${C.yellow}${errMsg}${C.reset}`, 'skip');
+          break;
+        }
+        log(addr, `Quantum Crate error: ${C.red}${errMsg}${C.reset} (code: ${r?.code ?? 'none'})`, 'warn');
+        break;
+      }
+
+      if (r?.success) {
+        opened++;
+        const reward   = r.reward?.label  ?? `${r.reward?.amount ?? '?'} QE`;
+        const opensSvr = r.opens_today    ?? opened;
+        const limitSvr = r.daily_open_limit ?? limit;
+        const qeTotal  = r.new_total_qe   ?? '-';
+        totalQe       += r.reward?.amount ?? 0;
+
+        log(addr,
+          `Quantum Crate ${opensSvr}/${limitSvr} ? — reward: ${C.green}${C.bold}${reward}${C.reset} | QE total: ${C.cyan}${qeTotal}${C.reset}`,
+          'ok'
+        );
+
+        // Stop if server says we've hit the daily limit
+        if (opensSvr >= limitSvr) {
+          log(addr, `Quantum Crate: daily limit reached (${opensSvr}/${limitSvr})`, 'skip');
+          break;
+        }
+      } else {
+        log(addr, `Quantum Crate unexpected response: ${JSON.stringify(r)}`, 'warn');
+        break;
+      }
+
+    } catch (e) {
+      if (isServerError(e)) {
+        log(addr, `Quantum Crate server error — stop: ${e.message}`, 'skip');
+        break;
+      }
+      log(addr, `Quantum Crate error: ${e.message}`, 'warn');
+      break;
+    }
+
+    await sleep(1500 + Math.random() * 1500);
+  }
+
+  stats.qcrate = opened > 0
+    ? `${opened}/${limit} opened (+${totalQe} QE)`
+    : 'none opened';
 }
 
 // ================= BURN =================
@@ -436,9 +613,9 @@ async function runWallet(pk, proxy, index, total) {
   const signer   = wallet.connect(provider);
   const api      = new ApiClient(wallet, proxy);
 
-  const stats = { txSent: 0, txTotal: 5, faucet: '', burn: '', qe: null, badges: '0' };
+  const stats = { txSent: 0, txTotal: 5, faucet: '', qcrate: '', burn: '', qe: null, badges: '0' };
 
-  divider('═');
+  divider('-');
   log(addr, `Wallet ${C.bold}${index}/${total}${C.reset} | ${proxy ? `proxy ${C.dim}${proxy.slice(0,20)}...${C.reset}` : 'direct'}`, 'start');
 
   // Auth
@@ -461,7 +638,7 @@ async function runWallet(pk, proxy, index, total) {
     // Handle: account not linked to X / Discord
     if (f?.code === 'social_required') {
       log(addr, `Faucet skipped — ${C.yellow}${f.error}${C.reset}`, 'warn');
-      log(addr, `${C.dim}👉 Link your X or Discord at https://inception.dachain.io to activate faucet.${C.reset}`, 'warn');
+      log(addr, `${C.dim}?? Link your X or Discord at https://inception.dachain.io to activate faucet.${C.reset}`, 'warn');
       stats.faucet = 'social_required';
 
     // Handle: already claimed
@@ -496,16 +673,20 @@ async function runWallet(pk, proxy, index, total) {
   }
   await sleep(2000);
 
-  // 2. Send 5 TX
+  // 2. Quantum Crate (5x/day, costs 150 QE each)
+  await openQuantumCrates(api, addr, stats);
+  await sleep(2000);
+
+  // 3. Send 5 TX
   await sendTxs(signer, api, addr, stats);
 
-  // 3. Burn DACC for QE
+  // 5. Burn DACC for QE
   await burnForQE(signer, api, addr, stats);
 
-  // 4. Mint badges
+  // 6. Mint badges
   await mintBadges(signer, api, addr, stats);
 
-  // 5. Profile / QE balance
+  // 7. Profile / QE balance
   try {
     const p = await api.profile();
     const qe = p?.qe_balance ?? p?.balance ?? '-';
@@ -527,32 +708,47 @@ function loadKeys() {
     .map(x => x.trim())
     .filter(x => x.startsWith('0x'));
 }
+
+// Concurrency pool — runs N wallets in parallel at once
+async function runWithConcurrency(tasks, limit) {
+  let idx = 0;
+  async function worker() {
+    while (idx < tasks.length) {
+      const i = idx++;
+      await tasks[i]();
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
+  await Promise.all(workers);
+}
+
 async function runAll() {
   const keys    = loadKeys();
   const proxies = loadProxies();
+  const concurrency = CFG.concurrency || 3;
 
-  console.log(`\n${C.bold}${C.cyan}${'═'.repeat(55)}${C.reset}`);
-  console.log(`${C.bold}${C.cyan}  DAC Inception Bot — ${keys.length} wallet(s) loaded${C.reset}`);
-  console.log(`${C.bold}${C.cyan}${'═'.repeat(55)}${C.reset}\n`);
+  console.log(`\n${C.bold}${C.cyan}${'-'.repeat(55)}${C.reset}`);
+  console.log(`${C.bold}${C.cyan}  DAC Inception Bot — ${keys.length} wallet(s) | parallel: ${concurrency}${C.reset}`);
+  console.log(`${C.bold}${C.cyan}${'-'.repeat(55)}${C.reset}\n`);
 
   let done = 0, skipped = 0;
 
-  for (let i = 0; i < keys.length; i++) {
+  const tasks = keys.map((pk, i) => async () => {
     const proxy = proxies.length ? proxies[i % proxies.length] : null;
     try {
-      await runWallet(keys[i], proxy, i + 1, keys.length);
+      await runWallet(pk, proxy, i + 1, keys.length);
       done++;
     } catch (e) {
-      // Unexpected top-level error — skip this wallet
-      console.log(`${ts()} ${C.red}✘${C.reset} Wallet ${i+1} unexpected error — skip: ${e.message}`);
+      console.log(`${ts()} ${C.red}✖${C.reset} Wallet ${i+1} unexpected error — skip: ${e.message}`);
       skipped++;
     }
-    await sleep(3000 + Math.random() * 3000);
-  }
+  });
 
-  divider('═');
-  console.log(`${ts()} ${C.bold}${C.green}✅ Cycle done — ${done} OK, ${skipped} skipped${C.reset}`);
-  divider('═');
+  await runWithConcurrency(tasks, concurrency);
+
+  divider('-');
+  console.log(`${ts()} ${C.bold}${C.green}✔ Cycle done — ${done} OK, ${skipped} skipped${C.reset}`);
+  divider('-');
   console.log();
 }
 
@@ -560,10 +756,12 @@ async function runAll() {
 (async () => {
   let cycle = 1;
   while (true) {
-    console.log(`${ts()} ${C.bold}${C.magenta}🔄 Starting cycle #${cycle}${C.reset}`);
+    console.log(`${ts()} ${C.bold}${C.magenta}?? Starting cycle #${cycle}${C.reset}`);
     await runAll();
     cycle++;
-    console.log(`${ts()} ${C.dim}Next cycle in ${CFG.loopMs / 60000} min...${C.reset}\n`);
-    await sleep(CFG.loopMs);
+    const nextHr = CFG.loopMinHr + Math.random() * (CFG.loopMaxHr - CFG.loopMinHr);
+    const nextMs = Math.floor(nextHr * 60 * 60 * 1000);
+    console.log(`${ts()} ${C.dim}Next cycle in ${nextHr.toFixed(2)} hours...${C.reset}\n`);
+    await sleep(nextMs);
   }
 })();
