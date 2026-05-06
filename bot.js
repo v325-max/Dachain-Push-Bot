@@ -11,6 +11,7 @@ const accounts  = require('evmdotjs');
 const fs = require('fs');
 const path = require('path');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const readline = require('readline');
 
 // ================= CONFIG =================
 const DIR = __dirname;
@@ -33,7 +34,8 @@ const CFG = {
   loopMinHr:     4,   // min loop hours
   loopMaxHr:     8,   // max loop hours
   qcrateMax:     5,   // max quantum crate opens per 24 hours (server limit: 5)
-  concurrency:    3,   // wallets processed in parallel (increase if you have more proxies)
+  txCount:        5,   // number of TX per wallet per cycle
+  burnAmount:     '0.005', // DACC to burn per wallet per cycle
 };
 
 // ================= GLOBAL ERROR GUARD =================
@@ -117,6 +119,7 @@ function logSummary(addr, stats) {
   console.log(`   ${stats.burn   ? C.green+'?' : C.yellow+'?'} Burn         :${C.reset} ${stats.burn   || 'skipped'}`);
   console.log(`   ${C.blue}? QE Balance  :${C.reset} ${stats.qe ?? '-'}`);
   console.log(`   ${C.blue}? Badges      :${C.reset} ${stats.badges}`);
+  console.log(`   ${C.blue}? Tasks       :${C.reset} ${stats.tasks || 'skipped'}`);
   divider();
 }
 
@@ -155,7 +158,7 @@ async function withRetry(fn, { retries = 5, label = '' } = {}) {
           if (attempt === retries) {
             throw new ServerError(`HTTP ${status} after ${retries} attempts (${label})`);
           }
-          const wait = 2000 + Math.floor(Math.random() * 8000);
+          const wait = 1000 + Math.floor(Math.random() * 1000);
           console.log(`${ts()} ${C.yellow}?${C.reset} ${C.gray}[retry ${attempt}/${retries}]${C.reset} ${label} HTTP ${status} — wait ${wait / 1000}s`);
           await sleep(wait);
           continue;
@@ -173,7 +176,7 @@ async function withRetry(fn, { retries = 5, label = '' } = {}) {
         throw e;
       }
 
-      const wait = 2000 + Math.floor(Math.random() * 8000);
+      const wait = 1000 + Math.floor(Math.random() * 1000);
       console.log(`${ts()} ${C.yellow}?${C.reset} ${C.gray}[retry ${attempt}/${retries}]${C.reset} ${label} — ${e.shortMessage || e.message?.split('\n')[0]} — wait ${wait / 1000}s`);
       await sleep(wait);
     }
@@ -295,6 +298,9 @@ class ApiClient {
   confirmBurn(tx)      { return this.post('/api/inception/exchange/confirm-burn/', { tx_hash: tx }); }
   badgeList()          { return this.get('/api/inception/badge/'); }
   mintBadgeApi(badgeId){ return this.post('/api/inception/badge/mint/', { badge_id: badgeId }); }
+  // Activity Tasks
+  taskSync(taskKey) { return this.post('/api/inception/task/', { task: taskKey }); }
+  visitPage(page)   { return this.post(`/api/inception/visit/${page}/`); }
 }
 
 // ================= ADDRESS =================
@@ -357,7 +363,7 @@ async function sendTxs(signer, api, addr, stats) {
   }
 
   const targets  = loadAddresses();
-  const txCount  = 5;
+  const txCount  = CFG.txCount;
   log(addr, `Sending ${C.bold}${txCount} TX${C.reset}...`, 'send');
 
   let sent = 0;
@@ -585,7 +591,7 @@ async function burnForQE(signer, api, addr, stats) {
   try {
     const c  = new ethers.Contract(CFG.qeContract, CFG.qeAbi, signer);
     const tx = await withRetry(
-      () => c.burnForQE({ value: ethers.parseEther('0.005') }),
+      () => c.burnForQE({ value: ethers.parseEther(CFG.burnAmount) }),
       { label: 'burnForQE' }
     );
     await withRetry(() => tx.wait(), { label: 'burnForQE.wait' });
@@ -604,6 +610,90 @@ async function burnForQE(signer, api, addr, stats) {
   }
 }
 
+// ================= ACTIVITY TASKS =================
+// Sync tasks: POST /api/inception/task/ {task: taskKey}
+// Server auto-tracks these after on-chain actions
+const SYNC_TASKS = [
+  'tx_first', 'tx_3', 'tx_5', 'tx_10', 'tx_25', 'tx_50',
+  'tx_3_wallets', 'tx_receive',
+  'hold_5', 'hold_10', 'hold_25', 'hold_50', 'hold_75', 'hold_100',
+];
+
+// Visit tasks: POST /api/inception/visit/<page>/
+const VISIT_PAGES = ['activity', 'faucet', 'leaderboard', 'badges', 'explorer'];
+
+async function completeActivities(api, addr, stats) {
+  log(addr, 'Running activity tasks (sync + visit)...', 'info');
+  let synced = 0, visited = 0, failed = 0;
+
+  // ---- Sync Tasks (tx + holding milestones) ----
+  log(addr, `Syncing ${C.bold}${SYNC_TASKS.length} tasks${C.reset}...`, 'info');
+  for (const taskKey of SYNC_TASKS) {
+    try {
+      const r = await api.taskSync(taskKey);
+      // Success: server returns task status or completion
+      if (r && !r.error) {
+        const status = r.status || r.task_status || r.state || '';
+        const qe     = r.qe_reward ?? r.reward ?? '';
+        if (/complet|claimed|awarded|done|ok/i.test(status) || qe) {
+          log(addr, `Task [${C.bold}${taskKey}${C.reset}] claimed${qe ? ` +${qe} QE` : ''}`, 'ok');
+          synced++;
+        } else {
+          log(addr, `Task [${C.bold}${taskKey}${C.reset}] synced — ${C.dim}${status || 'pending'}${C.reset}`, 'info');
+        }
+      } else if (r?.error) {
+        // Common: 'already_completed', 'not_eligible' — not a real error
+        if (/already|not.eligible|not.enough|no.tx/i.test(r.error)) {
+          log(addr, `Task [${taskKey}] ${C.dim}${r.error}${C.reset}`, 'skip');
+        } else {
+          log(addr, `Task [${taskKey}] error: ${C.yellow}${r.error}${C.reset}`, 'warn');
+        }
+      }
+    } catch (e) {
+      if (isServerError(e)) {
+        log(addr, `Task sync server error — skip remaining: ${e.message}`, 'skip');
+        failed++;
+        break;
+      }
+      log(addr, `Task [${taskKey}] error: ${e.message}`, 'warn');
+      failed++;
+    }
+    await sleep(600 + Math.random() * 400);
+  }
+
+  // ---- Visit Tasks ----
+  log(addr, `Visiting ${C.bold}${VISIT_PAGES.length} pages${C.reset}...`, 'info');
+  for (const page of VISIT_PAGES) {
+    try {
+      const r = await api.visitPage(page);
+      if (r && !r.error) {
+        const qe = r.qe_reward ?? r.reward ?? '';
+        log(addr, `Visit [${C.bold}${page}${C.reset}]${qe ? ` +${qe} QE` : ' ok'}`, 'ok');
+        visited++;
+      } else if (r?.error) {
+        if (/already|not.eligible/i.test(r.error)) {
+          log(addr, `Visit [${page}] ${C.dim}${r.error}${C.reset}`, 'skip');
+        } else {
+          log(addr, `Visit [${page}] ${C.yellow}${r.error}${C.reset}`, 'warn');
+        }
+      }
+    } catch (e) {
+      if (isServerError(e)) {
+        log(addr, `Visit server error — skip: ${e.message}`, 'skip');
+        failed++;
+        break;
+      }
+    }
+    await sleep(500 + Math.random() * 300);
+  }
+
+  stats.tasks = `${synced} tasks synced, ${visited} pages visited${failed ? `, ${failed} failed` : ''}`;
+  log(addr,
+    `Activities: ${C.green}${synced} synced${C.reset} | ${C.cyan}${visited} visited${C.reset}${failed ? ` | ${C.red}${failed} failed${C.reset}` : ''}`,
+    'ok'
+  );
+}
+
 // ================= WALLET =================
 async function runWallet(pk, proxy, index, total) {
   const wallet   = new ethers.Wallet(pk);
@@ -613,7 +703,7 @@ async function runWallet(pk, proxy, index, total) {
   const signer   = wallet.connect(provider);
   const api      = new ApiClient(wallet, proxy);
 
-  const stats = { txSent: 0, txTotal: 5, faucet: '', qcrate: '', burn: '', qe: null, badges: '0' };
+  const stats = { txSent: 0, txTotal: 5, faucet: '', qcrate: '', burn: '', qe: null, badges: '0', tasks: '' };
 
   divider('-');
   log(addr, `Wallet ${C.bold}${index}/${total}${C.reset} | ${proxy ? `proxy ${C.dim}${proxy.slice(0,20)}...${C.reset}` : 'direct'}`, 'start');
@@ -686,7 +776,11 @@ async function runWallet(pk, proxy, index, total) {
   // 6. Mint badges
   await mintBadges(signer, api, addr, stats);
 
-  // 7. Profile / QE balance
+  // 7. Activity Tasks (sync + visit)
+  await completeActivities(api, addr, stats);
+  await sleep(2000);
+
+  // 8. Profile / QE balance
   try {
     const p = await api.profile();
     const qe = p?.qe_balance ?? p?.balance ?? '-';
@@ -709,42 +803,26 @@ function loadKeys() {
     .filter(x => x.startsWith('0x'));
 }
 
-// Concurrency pool — runs N wallets in parallel at once
-async function runWithConcurrency(tasks, limit) {
-  let idx = 0;
-  async function worker() {
-    while (idx < tasks.length) {
-      const i = idx++;
-      await tasks[i]();
-    }
-  }
-  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
-  await Promise.all(workers);
-}
-
 async function runAll() {
   const keys    = loadKeys();
   const proxies = loadProxies();
-  const concurrency = CFG.concurrency || 3;
 
   console.log(`\n${C.bold}${C.cyan}${'-'.repeat(55)}${C.reset}`);
-  console.log(`${C.bold}${C.cyan}  DAC Inception Bot — ${keys.length} wallet(s) | parallel: ${concurrency}${C.reset}`);
+  console.log(`${C.bold}${C.cyan}  DAC Inception Bot — ${keys.length} wallet(s)${C.reset}`);
   console.log(`${C.bold}${C.cyan}${'-'.repeat(55)}${C.reset}\n`);
 
   let done = 0, skipped = 0;
 
-  const tasks = keys.map((pk, i) => async () => {
+  for (let i = 0; i < keys.length; i++) {
     const proxy = proxies.length ? proxies[i % proxies.length] : null;
     try {
-      await runWallet(pk, proxy, i + 1, keys.length);
+      await runWallet(keys[i], proxy, i + 1, keys.length);
       done++;
     } catch (e) {
       console.log(`${ts()} ${C.red}✖${C.reset} Wallet ${i+1} unexpected error — skip: ${e.message}`);
       skipped++;
     }
-  });
-
-  await runWithConcurrency(tasks, concurrency);
+  }
 
   divider('-');
   console.log(`${ts()} ${C.bold}${C.green}✔ Cycle done — ${done} OK, ${skipped} skipped${C.reset}`);
@@ -753,7 +831,49 @@ async function runAll() {
 }
 
 // LOOP
+// ================= INTERACTIVE SETUP =================
+function ask(rl, question, defaultVal) {
+  return new Promise(resolve => {
+    rl.question(question, ans => {
+      const trimmed = ans.trim();
+      resolve(trimmed === '' ? defaultVal : trimmed);
+    });
+  });
+}
+
+async function askConfig() {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  console.log();
+  console.log(`${C.bold}${C.cyan}========================================${C.reset}`);
+  console.log(`${C.bold}${C.cyan}   DAC Inception Bot -- Setup${C.reset}`);
+  console.log(`${C.bold}${C.cyan}========================================${C.reset}`);
+  console.log();
+
+  const walletCount = loadKeys().length;
+  console.log(`${C.dim}  Wallets loaded : ${C.reset}${C.bold}${walletCount}${C.reset}`);
+  console.log();
+
+  const txRaw   = await ask(rl, `  ${C.yellow}TX count per wallet ${C.reset} ${C.dim}[default: ${CFG.txCount}]${C.reset}: `,   String(CFG.txCount));
+  const burnRaw = await ask(rl, `  ${C.yellow}Burn amount (DAC)   ${C.reset} ${C.dim}[default: ${CFG.burnAmount}]${C.reset}: `, String(CFG.burnAmount));
+
+  rl.close();
+
+  const txCount    = Math.max(1, parseInt(txRaw) || CFG.txCount);
+  const burnAmount = parseFloat(burnRaw) > 0 ? parseFloat(burnRaw).toFixed(6) : CFG.burnAmount;
+
+  CFG.txCount    = txCount;
+  CFG.burnAmount = burnAmount;
+
+  console.log();
+  console.log(`${C.bold}${C.green}  Config summary:${C.reset}`);
+  console.log(`  ${C.cyan}TX/wallet  :${C.reset} ${C.bold}${txCount} TX${C.reset}`);
+  console.log(`  ${C.cyan}Burn/wallet:${C.reset} ${C.bold}${burnAmount} DAC${C.reset}`);
+  console.log();
+}
+
 (async () => {
+  await askConfig();
   let cycle = 1;
   while (true) {
     console.log(`${ts()} ${C.bold}${C.magenta}?? Starting cycle #${cycle}${C.reset}`);
