@@ -31,8 +31,8 @@ const CFG = {
     'function claim(uint256 badgeId) external',
     'function safeMint(address to, uint256 tokenId) external',
   ],
-  loopMinHr:     4,   // min loop hours
-  loopMaxHr:     8,   // max loop hours
+  loopMinHr:     11,  // min loop hours
+  loopMaxHr:     12,  // max loop hours
   qcrateMax:     5,   // max quantum crate opens per 24 hours (server limit: 5)
   txCount:        5,   // number of TX per wallet per cycle
   burnAmount:     '0.005', // DACC to burn per wallet per cycle
@@ -819,13 +819,13 @@ async function runAll() {
       await runWallet(keys[i], proxy, i + 1, keys.length);
       done++;
     } catch (e) {
-      console.log(`${ts()} ${C.red}✖${C.reset} Wallet ${i+1} unexpected error — skip: ${e.message}`);
+      console.log(`${ts()} ${C.red}?${C.reset} Wallet ${i+1} unexpected error — skip: ${e.message}`);
       skipped++;
     }
   }
 
   divider('-');
-  console.log(`${ts()} ${C.bold}${C.green}✔ Cycle done — ${done} OK, ${skipped} skipped${C.reset}`);
+  console.log(`${ts()} ${C.bold}${C.green}? Cycle done — ${done} OK, ${skipped} skipped${C.reset}`);
   divider('-');
   console.log();
 }
