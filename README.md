@@ -12,6 +12,7 @@ Automated daily activities for [DAC Inception](https://inception.dachain.io/acti
 
 | Version | Change |
 |---------|--------|
+| **v1.8** | Loop interval updated to 11–12 hours — `loopMinHr` changed from 4 to 11, `loopMaxHr` changed from 8 to 12; bot now runs every 11–12 hours randomly per cycle |
 | **v1.7** | Fixed activity tasks — correct endpoint `POST /api/inception/task/` with `{task: taskKey}`; added 14 sync tasks + 5 visit page calls per cycle; removed duplicate `runWallet` |
 | **v1.6** | Full English output — all prompts, logs, and summaries now in English; interactive setup asks TX count and burn amount on every run |
 | **v1.5** | Auto activity tasks — `completeActivities()` fetches `/api/inception/task/`, detects open/pending tasks, auto-syncs onchain tasks, completes social tasks, and claims rewards each cycle |
