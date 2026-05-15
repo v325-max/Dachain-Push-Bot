@@ -12,6 +12,7 @@ Automated daily activities for [DAC Inception](https://inception.dachain.io/acti
 
 | Version | Change |
 |---------|--------|
+| **v1.9** | TLS/socket disconnect guard — wallet is automatically skipped after 3 consecutive `Client network socket disconnected before secure TLS` errors; `createProvider()` now accepts a `tlsTracker` object; `checkTlsSkip()` is called before each major step (Quantum Crate, Send TX, Burn) inside `runWallet()` |
 | **v1.8** | Loop interval updated to 11–12 hours — `loopMinHr` changed from 4 to 11, `loopMaxHr` changed from 8 to 12; bot now runs every 11–12 hours randomly per cycle |
 | **v1.7** | Fixed activity tasks — correct endpoint `POST /api/inception/task/` with `{task: taskKey}`; added 14 sync tasks + 5 visit page calls per cycle; removed duplicate `runWallet` |
 | **v1.6** | Full English output — all prompts, logs, and summaries now in English; interactive setup asks TX count and burn amount on every run |
@@ -26,7 +27,7 @@ Automated daily activities for [DAC Inception](https://inception.dachain.io/acti
 
 ## Next Update
 
-Auto Reff
+Auto Reff (planned)
 
 ---
 
@@ -361,6 +362,7 @@ All RPC and API calls are automatically retried up to **5 times** with randomize
 | `Badge on-chain mint skipped` | Badge not yet earned or already minted |
 | `API retry exhausted` | Server down — bot will retry next cycle |
 | `Task: already / not_eligible` | Normal — task already completed before |
+| `TLS/socket disconnect x3 — wallet skipped` | RPC node dropped TLS 3+ times — wallet auto-skipped; check RPC or proxy stability |
 
 ---
 
