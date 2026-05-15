@@ -38,8 +38,10 @@ const CFG = {
   loopMinHr:     11,  // min loop hours
   loopMaxHr:     12,  // max loop hours
   qcrateMax:     5,   // max quantum crate opens per 24 hours (server limit: 5)
-  txCount:        3,   // number of TX per wallet per cycle
-  burnAmount:     '0.005', // DACC to burn per wallet per cycle
+  txCount:        3,   // number of TX per wallet per cycle (0 = skip TX)
+  burnAmount:     '0.005', // DACC to burn per wallet per cycle ('0' = skip burn)
+  skipTx:         false,  // skip TX entirely if true
+  skipBurn:       false,  // skip burn entirely if true
   mintBadge:      true, // [ENHANCED] enable/disable badge minting
   txMinAmt:       0.01,  // min DAC per TX send (auto-scaled to balance)
   txMaxAmt:       0.05,  // max DAC per TX send (auto-scaled to balance)
@@ -1261,11 +1263,21 @@ async function runWallet(pk, proxy, index, total) {
 
   checkTlsSkip(); // skip if too many TLS errors
   // 3. Send TX
-  await sendTxs(signer, api, addr, stats);
+  if (CFG.skipTx) {
+    log(addr, 'TX skipped (txCount = 0)', 'skip');
+    stats.txSent = 0; stats.txTotal = 0;
+  } else {
+    await sendTxs(signer, api, addr, stats);
+  }
 
   checkTlsSkip(); // skip if too many TLS errors
   // 4. Burn DACC for QE
-  await burnForQE(signer, api, addr, stats);
+  if (CFG.skipBurn) {
+    log(addr, 'Burn skipped (burnAmount = 0)', 'skip');
+    stats.burn = 'skipped';
+  } else {
+    await burnForQE(signer, api, addr, stats);
+  }
 
   // 5. Fetch profile early ? provides badge list + faucet timer (reused by mintBadges)
   let profileData = null;
@@ -1357,7 +1369,7 @@ async function askConfig() {
   // If stdin is not a TTY (PM2, nohup, piped, screen) ? skip prompts, use defaults
   if (!process.stdin.isTTY) {
     console.log(`\n${C.bold}${C.cyan}  DAC Inception Bot ? Non-interactive mode (defaults used)${C.reset}`);
-    console.log(`  ${C.dim}TX: ${CFG.txCount} | Burn: ${CFG.burnAmount} DAC | Badge: ${CFG.mintBadge ? 'ON' : 'OFF'}${C.reset}\n`);
+    console.log(`  ${C.dim}TX: ${CFG.skipTx ? 'SKIPPED' : CFG.txCount} | Burn: ${CFG.skipBurn ? 'SKIPPED' : CFG.burnAmount+' DAC'} | Badge: ${CFG.mintBadge ? 'ON' : 'OFF'}${C.reset}\n`);
     return;
   }
 
@@ -1373,19 +1385,26 @@ async function askConfig() {
   console.log(`${C.dim}  Wallets loaded : ${C.reset}${C.bold}${walletCount}${C.reset}`);
   console.log();
 
-  const txRaw    = await ask(rl, `  ${C.yellow}TX count per wallet  ${C.reset} ${C.dim}[default: ${CFG.txCount}]${C.reset}: `,    String(CFG.txCount));
+  const txRaw    = await ask(rl, `  ${C.yellow}TX count per wallet  ${C.reset} ${C.dim}[default: ${CFG.txCount}, enter 0 to skip TX]${C.reset}: `,    String(CFG.txCount));
   const txAmtRaw = await ask(rl, `  ${C.yellow}TX max amount (DAC)  ${C.reset} ${C.dim}[default: ${CFG.txMaxAmt}, auto-scaled to balance]${C.reset}: `, String(CFG.txMaxAmt));
-  const burnRaw  = await ask(rl, `  ${C.yellow}Burn amount (DAC)    ${C.reset} ${C.dim}[default: ${CFG.burnAmount}, max: 0.1]${C.reset}: `,  String(CFG.burnAmount));
+  const burnRaw  = await ask(rl, `  ${C.yellow}Burn amount (DAC)    ${C.reset} ${C.dim}[default: ${CFG.burnAmount}, max: 0.1, enter 0 to skip burn]${C.reset}: `,  String(CFG.burnAmount));
   const mintRaw  = await ask(rl, `  ${C.yellow}Mint badges? (y/n)   ${C.reset} ${C.dim}[default: y]${C.reset}: `, 'y');
 
   rl.close();
 
-  const txCount    = Math.max(1, parseInt(txRaw) || CFG.txCount);
-  // Guard: cap burn at 0.1 DAC max to prevent accidentally entering 1 or large values
+  // TX: 0 means skip entirely
+  const txParsed   = parseInt(txRaw);
+  const skipTx     = txParsed === 0;
+  const txCount    = skipTx ? 0 : (Math.max(1, txParsed || CFG.txCount));
+
+  // Burn: 0 means skip entirely; otherwise cap at 0.1 DAC
   const burnParsed = parseFloat(burnRaw);
-  const burnAmount = (burnParsed > 0 && burnParsed <= 0.1)
-    ? burnParsed.toFixed(6)
-    : CFG.burnAmount; // fall back to default if input is 0, negative, or > 0.1
+  const skipBurn   = burnParsed === 0;
+  const burnAmount = skipBurn
+    ? '0'
+    : ((burnParsed > 0 && burnParsed <= 0.1)
+        ? burnParsed.toFixed(6)
+        : CFG.burnAmount); // fall back to default if > 0.1
 
   const txMaxAmt = parseFloat(txAmtRaw) > 0 ? parseFloat(txAmtRaw) : CFG.txMaxAmt;
   const txMinAmt = txMaxAmt * 0.3; // min = 30% of max
@@ -1394,13 +1413,15 @@ async function askConfig() {
   CFG.txMaxAmt   = txMaxAmt;
   CFG.txMinAmt   = txMinAmt;
   CFG.burnAmount = burnAmount;
+  CFG.skipTx     = skipTx;
+  CFG.skipBurn   = skipBurn;
   CFG.mintBadge  = mintRaw.toLowerCase() !== 'n';
 
   console.log();
   console.log(`${C.bold}${C.green}  Config summary:${C.reset}`);
-  console.log(`  ${C.cyan}TX/wallet  :${C.reset} ${C.bold}${txCount} TX${C.reset}`);
-  console.log(`  ${C.cyan}TX amount  :${C.reset} ${C.bold}${txMinAmt.toFixed(4)}?${txMaxAmt} DAC each${C.reset}`);
-  console.log(`  ${C.cyan}Burn/wallet:${C.reset} ${C.bold}${burnAmount} DAC${C.reset}`);
+  console.log(`  ${C.cyan}TX/wallet  :${C.reset} ${C.bold}${skipTx ? C.yellow+'SKIPPED' : txCount+' TX'}${C.reset}`);
+  console.log(`  ${C.cyan}TX amount  :${C.reset} ${C.bold}${skipTx ? C.dim+'n/a' : txMinAmt.toFixed(4)+'–'+txMaxAmt+' DAC each'}${C.reset}`);
+  console.log(`  ${C.cyan}Burn/wallet:${C.reset} ${C.bold}${skipBurn ? C.yellow+'SKIPPED' : burnAmount+' DAC'}${C.reset}`);
   console.log(`  ${C.cyan}Mint badge :${C.reset} ${C.bold}${CFG.mintBadge ? C.green+'YES' : C.red+'NO'}${C.reset}`);
   console.log();
 }
