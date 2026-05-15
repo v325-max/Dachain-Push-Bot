@@ -12,6 +12,7 @@ Automated daily activities for [DAC Inception](https://inception.dachain.io/acti
 
 | Version | Change |
 |---------|--------|
+| **v2.0** | Skip TX & Skip Burn — enter `0` for TX count to skip all transfers; enter `0` for burn amount to skip burn; `CFG.skipTx` and `CFG.skipBurn` flags control per-wallet logic in `runWallet()`; config summary shows `SKIPPED` label when disabled |
 | **v1.9** | TLS/socket disconnect guard — wallet is automatically skipped after 3 consecutive `Client network socket disconnected before secure TLS` errors; `createProvider()` now accepts a `tlsTracker` object; `checkTlsSkip()` is called before each major step (Quantum Crate, Send TX, Burn) inside `runWallet()` |
 | **v1.8** | Loop interval updated to 11–12 hours — `loopMinHr` changed from 4 to 11, `loopMaxHr` changed from 8 to 12; bot now runs every 11–12 hours randomly per cycle |
 | **v1.7** | Fixed activity tasks — correct endpoint `POST /api/inception/task/` with `{task: taskKey}`; added 14 sync tasks + 5 visit page calls per cycle; removed duplicate `runWallet` |
@@ -38,7 +39,7 @@ Auto Reff (planned)
 | 1 | 🚰 Faucet | Claim free DACC (requires X or Discord linked) |
 | 2 | 📦 Quantum Crate | Open up to 5 crates/day — costs 150 QE each |
 | 3 | 💸 TX | Transfer to `address.txt` list or random addresses |
-| 4 | 🔥 Burn | Burn DACC → Quantum Energy (QE) |
+| 4 | 🔥 Burn | Burn DACC → Quantum Energy (QE) *(skippable: enter 0)* |
 | 5 | 🏅 Badge | Auto-mint all claimable badges (API + on-chain) |
 | 6 | 📋 Tasks | Sync 14 onchain tasks + visit 5 pages |
 | 7 | 📊 Profile | Fetch and log QE balance |
@@ -363,6 +364,8 @@ All RPC and API calls are automatically retried up to **5 times** with randomize
 | `API retry exhausted` | Server down — bot will retry next cycle |
 | `Task: already / not_eligible` | Normal — task already completed before |
 | `TLS/socket disconnect x3 — wallet skipped` | RPC node dropped TLS 3+ times — wallet auto-skipped; check RPC or proxy stability |
+| `TX skipped (txCount = 0)` | TX intentionally disabled — enter a value > 0 at setup prompt to enable |
+| `Burn skipped (burnAmount = 0)` | Burn intentionally disabled — enter a value > 0 (max 0.1) at setup prompt to enable |
 
 ---
 
